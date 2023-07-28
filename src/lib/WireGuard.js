@@ -6,6 +6,8 @@ const path = require('path');
 const debug = require('debug')('WireGuard');
 const uuid = require('uuid');
 const QRCode = require('qrcode');
+const { BigInteger } = require('jsbn');
+const { Address4 } = require('ip-address');
 
 const Util = require('./Util');
 const ServerError = require('./ServerError');
@@ -24,6 +26,10 @@ const {
   WG_PRE_DOWN,
   WG_POST_DOWN,
 } = require('../config');
+
+const subnetAddress = new Address4(WG_DEFAULT_ADDRESS);
+const subnetStartAddressI = subnetAddress.startAddressExclusive().bigInteger();
+const subnetEndAddressI = subnetAddress.endAddressExclusive().bigInteger();
 
 module.exports = class WireGuard {
 
@@ -45,7 +51,7 @@ module.exports = class WireGuard {
           const publicKey = await Util.exec(`echo ${privateKey} | wg pubkey`, {
             log: 'echo ***hidden*** | wg pubkey',
           });
-          const address = WG_DEFAULT_ADDRESS.replace('x', '1');
+          const address = await this.__getNthHostAddress(1);
 
           config = {
             server: {
@@ -232,24 +238,28 @@ Endpoint = ${WG_HOST}:${WG_PORT}`;
 
     // Calculate next IP
     let address;
-    for (let i = 2; i < 255; i++) {
-      const client = Object.values(config.clients).find(client => {
-        return client.address === WG_DEFAULT_ADDRESS.replace('x', i);
-      });
 
-      if (!client) {
-        address = WG_DEFAULT_ADDRESS.replace('x', i);
-        break;
+    try {
+      for (let i = 1; ; i++) {
+        const nextAddress = await this.__getNthHostAddress(i);
+
+        const client = Object.values(config.clients).find(client => {
+          return client.address === nextAddress;
+        });
+
+        if (!client) {
+          address = nextAddress;
+          break;
+        }
       }
-    }
-
-    if (!address) {
-      throw new Error('Maximum number of clients reached.');
+    } catch (error) {
+      throw new Error('Maximum number of clients reached.', error);
     }
 
     // Create Client
     const clientId = uuid.v4();
     const client = {
+      clientId,
       name,
       address,
       privateKey,
@@ -316,6 +326,17 @@ Endpoint = ${WG_HOST}:${WG_PORT}`;
     client.updatedAt = new Date();
 
     await this.saveConfig();
+  }
+
+  async __getNthHostAddress(n) {
+    const bigN = new BigInteger(n.toString());
+    const newAddressI = subnetStartAddressI.add(bigN);
+
+    if (newAddressI.compareTo(subnetEndAddressI) > 0) {
+      throw new Error(`Subnet ${WG_DEFAULT_ADDRESS} doesn't contain ${n} host addresses!`);
+    }
+
+    return Address4.fromBigInteger(newAddressI).correctForm();
   }
 
 };
